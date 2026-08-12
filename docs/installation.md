@@ -26,6 +26,7 @@ present:
 | Go | `go` toolchain |
 | Java | JDK + Maven/Gradle (jqwik) |
 | OpenHarmony components (cross-compiled to arm) | optional `qemu-user` (`qemu-arm`), to run arm binaries on an x86 machine |
+| A HarmonyOS app on a real phone | `hdc` (HarmonyOS device connector) and a Kea2 checkout with its virtualenv — see [`pi-pbt kea`](#a-harmonyos-app-on-a-phone-pi-pbt-kea) |
 
 Debian/Ubuntu example for C++ targets:
 
@@ -54,22 +55,27 @@ Releases page, an internal mirror, or a direct handoff). Each ships with a
 Not sure which Linux one you need? `uname -m` — `x86_64` takes the x64 file,
 `aarch64` the arm64 one.
 
-Every archive extracts to a single executable named `pi-pbt` (about 100 MiB —
-most of that is the embedded Bun runtime, which is what makes the binary
-self-contained). `unzip` restores the executable bit, so there is no `chmod`
-step on Linux/macOS:
+Every archive extracts to a same-named directory containing `pi-pbt` and the
+adjacent `tools/fd` and `tools/rg`. Install the main executable and copy the
+bundled tools into the directory currently checked by the embedded pi tool
+manager:
 
 ```bash
-sha256sum -c pi-pbt-<platform>.zip.sha256   # optional integrity check
-unzip pi-pbt-<platform>.zip                 # yields ./pi-pbt
+PLATFORM=linux-x64   # or linux-arm64 / macos-arm64
+sha256sum -c "pi-pbt-${PLATFORM}.zip.sha256"   # optional integrity check
+unzip "pi-pbt-${PLATFORM}.zip"
+cd "pi-pbt-${PLATFORM}"
 sudo install -Dm755 pi-pbt /usr/local/bin/pi-pbt
+mkdir -p ~/.pi/agent/bin
+cp tools/fd ~/.pi/agent/bin/fd
+cp tools/rg ~/.pi/agent/bin/rg
+chmod +x ~/.pi/agent/bin/fd ~/.pi/agent/bin/rg
 ```
 
-(Extracting on Windows drops Unix permissions — as it does for any archive — so
-if the file travelled through a Windows machine, `chmod +x pi-pbt` first.)
-
-It does not matter where the real file lives; a symlink onto your `PATH` works
-too.
+Running `fd` or `rg` directly from a regular shell may still report command not
+found, which is expected; no additional `PATH` change is required. Extracting
+on Windows drops Unix permissions, so if the files travelled through a Windows
+machine, run `chmod +x` on `pi-pbt`, `tools/fd`, and `tools/rg` first.
 
 The arm64 and macOS builds are cross-compiled on an x64 Linux machine; they are
 validated by format (the release job asserts each is really an aarch64 ELF /
@@ -80,7 +86,7 @@ the interactive interface misbehaves, build from source on that machine
 macOS additionally needs the Gatekeeper quarantine cleared:
 
 ```bash
-xattr -d com.apple.quarantine /usr/local/bin/pi-pbt
+xattr -d com.apple.quarantine pi-pbt
 ```
 
 Verify:
@@ -204,6 +210,44 @@ To pin the entry point explicitly in a script, lead the first message with
 pi-pbt -p "/skill:pbt-workflow 对当前仓库做性质测试(PBT),目标是找出 bug。产物写到 pbt-out/。"
 ```
 
+### How deep it digs: effort tiers
+
+A campaign runs at one of three tiers. The tier fixes the wall-clock budget, how
+many properties are written, how many inputs each property is run against,
+whether an all-passing first batch is allowed to end the campaign, and whether a
+hard-to-build target may be swapped for an easier one.
+
+| | `quick` | `standard` | `thorough` |
+|---|---|---|---|
+| Wall-clock | ≈10 min | ≈30 min | no cap |
+| Properties per target | 3–5 | 5–8 | as many as the behavior warrants |
+| Inputs per property | framework default (~100) | ≥1000 | ≥10000 |
+| First batch all passes | may stop | strengthen and re-run ≥1 round | ≥2 rounds |
+| Metamorphic / differential property | optional | ≥1 required | both required where applicable |
+| Swap to an easier target when the build is hard | allowed | allowed, declared in the report | forbidden |
+
+Defaults differ by entry point, because they answer different questions:
+`hook-run` and `watch` fire on **every commit** and default to `quick`, so a
+commit gate stays fast; everything else defaults to `standard`.
+
+Set it per run with `--effort`, or for a whole environment with `PBT_EFFORT`:
+
+```bash
+pi-pbt hook-run <sha> --repo /path/to/repo --effort thorough
+pi-pbt watch --repo /path/to/repo --effort standard
+PBT_EFFORT=thorough pi-pbt -p "/skill:pbt-workflow ..."
+```
+
+Use `thorough` when finding the bug matters more than finishing quickly — a
+release candidate, a security-relevant module, or a component whose build is the
+expensive part. It has no time-box and no tool-call cap, and it forbids the
+agent from quietly picking an easier target when the real one is hard to
+compile.
+
+This is separate from how strong a model you use. The tier controls how much
+searching the agent does; the model controls how good its properties are. A weak
+model at `thorough` still writes weak properties — see the model section above.
+
 ### CI / git-hook integration
 
 To test **one specific commit**, use this subcommand:
@@ -253,10 +297,80 @@ pi-pbt watch --repo /path/to/repo --fetch --branch master --interval 60 --lang z
 The starting point is the latest commit at startup (commits that already existed
 are not tested retroactively); every new commit is then tested, with the verdict
 (the exit codes above) recorded in the log. All `hook-run` flags (`--out`,
-`--workdir`, `--spec`, `--lang`, `--scan-root`, `--provider`, `--model`,
-`--tui`) pass through. `--tui` (or `PBT_HOOK_TUI=1`) runs it in the full
+`--workdir`, `--spec`, `--lang`, `--scan-root`, `--effort`, `--provider`,
+`--model`, `--tui`) pass through. `--tui` (or `PBT_HOOK_TUI=1`) runs it in the full
 interactive interface in the same terminal (good for demos, not for CI: it stops
 and waits for `/quit` after each round).
+
+### A HarmonyOS app on a phone (`pi-pbt kea`)
+
+Everything above tests **source code**. `pi-pbt kea` tests something different:
+an **already installed HarmonyOS app on a USB-connected phone**, as a black box
+through its GUI. It drives the Kea2 engine over `hdc` — Kea2 explores the app
+while checking properties that must hold whatever the user does — and reports
+crashes, ANRs and property violations.
+
+Three things must be in place before it runs:
+
+| | |
+|---|---|
+| Phone | connected over USB and unlockable without a PIN; `hdc` on `PATH` (`hdc list targets` shows the serial) |
+| Kea2 | a Kea2 checkout with its virtualenv, i.e. `<kea_home>/.venv/bin/kea2` (or `venv/bin/kea2`) exists |
+| Decompile signals | `<decompile_home>/mined_all/<package>/signals.json`, mined from the app beforehand. Absent → it aborts rather than explore blind |
+
+Configuration is a `kea.config.yml` in the folder you run it from (the "SUT
+folder"). Minimal:
+
+```yaml
+package: com.example.app
+kea_home: /path/to/Kea2
+decompile_home: /path/to/harmony-decompile
+```
+
+Then:
+
+```bash
+cd /path/to/sut-folder     # the folder holding kea.config.yml
+pi-pbt kea                 # interactive
+pi-pbt kea -p              # headless (CI, nohup)
+pi-pbt kea -c              # continue: reuse the previous run's directory
+pi-pbt kea --config other.yml --lang zh
+```
+
+Those four flags are all it takes; everything else is configured in the file:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `package` | **required** | bundle name of the app under test |
+| `kea_home` | `~/github/Kea2` | Kea2 checkout (its virtualenv provides the `kea2` binary) |
+| `decompile_home` | **required** | directory holding `mined_all/<package>/signals.json` |
+| `device` | the connected one | device serial, when more than one phone is attached |
+| `out` | `pbt-out` | artifact directory, relative to the SUT folder |
+| `depth` | from the effort tier | `fast` (short pass) or `deep` (the full property packs) |
+| `events`, `running_minutes`, `throttle` | 15 / 6 / 500 (fast), 70 / 12 / 200 (deep) | exploration budget: max steps, wall-clock minutes, ms between events |
+| `mode_a_packs` | the built-in packs | `deep` only: Python modules holding the property packs to run |
+| `stamp_runs` | `true` | give each run its own timestamped directory; `false` writes flat into `out` |
+| `provider`, `model`, `lang` | — | same meaning as the global options |
+
+Depth is the same "how deep do we dig" knob as the [effort tiers](#how-deep-it-digs-effort-tiers)
+above, so it is not set twice: `depth:` in the config wins, then `PBT_KEA_DEPTH`,
+then the tier (`quick` → `fast`, `standard`/`thorough` → `deep`).
+
+What a run leaves behind:
+
+```text
+pbt-out/
+  LATEST                                    # points at the newest run directory
+  runs/<package>_modeB_<depth>_<stamp>/
+    layout.json      one UI dump of the app
+    kea-run/         Kea2's own output (res_*/result_*.json)
+    LAST_RUN.json    parsed counters: executions, failures, per property
+    REPORT.md        the verdict
+```
+
+A missing config file, a config without `package:`, or missing decompile
+signals stop it with an explanatory message and exit code `1`, before the phone
+is touched.
 
 ### Environment variables
 
@@ -266,6 +380,9 @@ and waits for `/quit` after each round).
 | `PBT_SCAN_ROOT=/path` | the repo to scan, for setups where the working directory is a clean copy (git hooks, CI) |
 | `PBT_OH_WORKSPACE=/path` | a pre-built full OpenHarmony source environment (source tree + toolchain + built dependencies) to reuse, instead of working out how to build the component standalone. **Detected automatically** when the repo sits inside such an environment (a parent directory with both `.repo/` and `out/`) — set it explicitly only to override; the startup log prints which one is in use |
 | `PBT_HOOK_TUI=1` | same as `hook-run --tui` / `watch --tui`: run in the interactive interface (needs a terminal; waits for `/quit`) |
+| `PBT_EFFORT=quick\|standard\|thorough` | how deep a campaign digs (see [effort tiers](#how-deep-it-digs-effort-tiers)); also `--effort` on `hook-run` / `watch`, which takes priority. Default: `quick` for `hook-run`/`watch`, `standard` elsewhere. Also sets the `kea` GUI exploration depth when `kea.config.yml` does not pin `depth:` (`quick` → short run, otherwise the long one) |
+| `PBT_KEA_DEPTH=fast\|deep` | [`pi-pbt kea`](#a-harmonyos-app-on-a-phone-pi-pbt-kea) exploration depth, overriding the effort tier; the config's `depth:` still wins |
+| `PBT_KEA_MODE_A_PACKS="pkg.a pkg.b"` | the property packs `pi-pbt kea` runs at `deep`, when the config sets no `mode_a_packs` |
 
 ## 5. Dashboard: watch it work, live
 

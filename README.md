@@ -28,10 +28,15 @@ Not sure which Linux build you need? `uname -m` — `x86_64` takes the x64 file,
 
 ```bash
 sha256sum -c pi-pbt-linux-x64.zip.sha256    # optional integrity check
-unzip pi-pbt-linux-x64.zip                  # yields ./pi-pbt, already executable
+unzip pi-pbt-linux-x64.zip                  # yields pi-pbt-linux-x64/, already executable
+cd pi-pbt-linux-x64                         # holds pi-pbt plus tools/fd and tools/rg
 sudo install -Dm755 pi-pbt /usr/local/bin/pi-pbt
 pi-pbt --help
 ```
+
+The archive also carries the two search tools the agent uses (`fd`, `rg`), so it
+works on a machine that has neither; the installation guide shows where to put
+them.
 
 Then configure a model and start a run — see the
 **[installation guide](docs/installation.md)**, which also covers the toolchains
@@ -55,10 +60,14 @@ Python / Rust / Go / Java / C++ 仓库,它会读源码,推断出「这段代码�
 
 ```bash
 sha256sum -c pi-pbt-linux-x64.zip.sha256    # 可选:校验完整性
-unzip pi-pbt-linux-x64.zip                  # 解出 ./pi-pbt,已带可执行权限
+unzip pi-pbt-linux-x64.zip                  # 解出 pi-pbt-linux-x64/,已带可执行权限
+cd pi-pbt-linux-x64                         # 里面是 pi-pbt 和 tools/fd、tools/rg
 sudo install -Dm755 pi-pbt /usr/local/bin/pi-pbt
 pi-pbt --help
 ```
+
+压缩包里还带了 agent 用到的两个搜索工具(`fd`、`rg`),所以在没装它们的机器上也
+能用;放置位置见安装指南。
 
 只有一个自包含的可执行文件,不需要 Node.js、Bun 或任何依赖。不确定该下哪个
 Linux 版本就看 `uname -m`:`x86_64` 用 x64,`aarch64` 用 arm64。

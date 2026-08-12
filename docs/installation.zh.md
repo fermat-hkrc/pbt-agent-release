@@ -23,6 +23,7 @@ pi-pbt 自己没有依赖。但它会**真实编译并运行它写出来的测�
 | Go | `go` 工具链 |
 | Java | JDK + Maven/Gradle(jqwik) |
 | OpenHarmony 组件(交叉编译到 arm) | 可选 `qemu-user`(`qemu-arm`),用于在 x86 机器上运行 arm 程序 |
+| 真机上的 HarmonyOS 应用 | `hdc`(HarmonyOS 设备连接工具)以及一份带虚拟环境的 Kea2 —— 见 [`pi-pbt kea`](#真机上的-harmonyos-应用pi-pbt-kea) |
 
 Debian/Ubuntu(C++ 目标)示例:
 
@@ -50,20 +51,24 @@ sudo pacman -S --needed git cmake ninja clang
 不确定该拿哪个 Linux 版本?跑 `uname -m` —— 显示 `x86_64` 用 x64 那个,显示
 `aarch64` 用 arm64 那个。
 
-每个压缩包解出来都是一个名为 `pi-pbt` 的可执行文件(约 100 MiB,其中绝大部分
-是内嵌的 Bun 运行时 —— 正是它让这个二进制自包含)。`unzip` 会恢复可执行位,
-所以在 Linux/macOS 上不需要 `chmod`:
+每个压缩包解出来都是一个同名目录，其中包含 `pi-pbt`、同级 `tools/fd` 和
+`tools/rg`。安装主程序，并把随包工具复制到当前嵌入式 pi 工具管理器检查的目录：
 
 ```bash
-sha256sum -c pi-pbt-<platform>.zip.sha256   # 可选的完整性校验
-unzip pi-pbt-<platform>.zip                 # 解出 ./pi-pbt
+PLATFORM=linux-x64   # 或 linux-arm64 / macos-arm64
+sha256sum -c "pi-pbt-${PLATFORM}.zip.sha256"   # 可选的完整性校验
+unzip "pi-pbt-${PLATFORM}.zip"
+cd "pi-pbt-${PLATFORM}"
 sudo install -Dm755 pi-pbt /usr/local/bin/pi-pbt
+mkdir -p ~/.pi/agent/bin
+cp tools/fd ~/.pi/agent/bin/fd
+cp tools/rg ~/.pi/agent/bin/rg
+chmod +x ~/.pi/agent/bin/fd ~/.pi/agent/bin/rg
 ```
 
-(在 Windows 上解压会丢掉 Unix 权限位 —— 任何压缩格式都一样 —— 所以如果文件
-中转过 Windows 机器,先 `chmod +x pi-pbt`。)
-
-放哪都行,做个符号链接到 `PATH` 也可以。
+普通 shell 中直接执行 `fd` 或 `rg` 仍可能提示找不到，这是正常的，无需额外修改
+`PATH`。在 Windows 上解压会丢掉 Unix 权限位；若文件中转过 Windows 机器，先给
+`pi-pbt`、`tools/fd` 和 `tools/rg` 执行 `chmod +x`。
 
 arm64 和 macOS 版都是在 x64 Linux 上交叉编译出来的,只做了格式校验(发布流程
 会断言产物确实是 aarch64 ELF / Mach-O arm64),没有在目标机器上实跑。命令行
@@ -73,7 +78,7 @@ arm64 和 macOS 版都是在 x64 Linux 上交叉编译出来的,只做了格式�
 macOS 还需清除 Gatekeeper 隔离标记:
 
 ```bash
-xattr -d com.apple.quarantine /usr/local/bin/pi-pbt
+xattr -d com.apple.quarantine pi-pbt
 ```
 
 验证:
@@ -185,6 +190,40 @@ pi-pbt -p "对当前仓库做性质测试(PBT),产物写到 pbt-out/。"
 pi-pbt -p "/skill:pbt-workflow 对当前仓库做性质测试(PBT),目标是找出 bug。产物写到 pbt-out/。"
 ```
 
+### 挖多深:effort 档位
+
+一次 campaign 跑在三档之一。档位决定了 wall-clock 预算、写多少条性质、每条
+性质拿多少组输入去打、首批性质全过算不算收工,以及难编译的目标能不能换成
+容易的。
+
+| | `quick` | `standard` | `thorough` |
+|---|---|---|---|
+| Wall-clock | ≈10 分钟 | ≈30 分钟 | 不设上限 |
+| 每个目标的性质条数 | 3–5 | 5–8 | 按目标行为需要,不设下限 |
+| 每条性质的输入组数 | 框架默认(约 100) | ≥1000 | ≥10000 |
+| 首批性质全过 | 可以收工 | 必须加强并重跑 ≥1 轮 | ≥2 轮 |
+| 蜕变 / 差分性质 | 可选 | 至少一条 | 目标支持就都必须做 |
+| 难编译时换个容易的目标 | 允许 | 允许,但要在报告里写明 | 禁止 |
+
+默认值按入口区分,因为它们回答的是不同的问题:`hook-run` 和 `watch` 是
+**每个提交**都触发的,默认 `quick`,保证提交门禁足够快;其他入口默认
+`standard`。
+
+单次运行用 `--effort`,整个环境用 `PBT_EFFORT`:
+
+```bash
+pi-pbt hook-run <sha> --repo /path/to/repo --effort thorough
+pi-pbt watch --repo /path/to/repo --effort standard
+PBT_EFFORT=thorough pi-pbt -p "/skill:pbt-workflow ..."
+```
+
+什么时候用 `thorough`:找到 bug 比早点跑完更重要的场合 —— 发版候选、
+安全相关模块、或者构建本身就很贵的组件。这一档没有时间上限、没有工具调用
+上限,并且**禁止**agent 在真实目标不好编译时偷偷换一个容易的目标。
+
+这跟"用多强的模型"是两回事:档位决定它搜索得多充分,模型决定它写出的性质
+有多锋利。弱模型跑 `thorough` 依然只会写出弱性质 —— 见前面选模型那节。
+
 ### CI / git hook 集成
 
 针对**单个提交**测一遍,用这个子命令:
@@ -228,7 +267,74 @@ pi-pbt watch --repo /path/to/repo --fetch --branch master --interval 60 --lang z
 
 起点是启动那一刻的最新提交(此前已有的提交不会补测);之后每来一个新提交
 测一遍,结论(上面那套退出码)打在日志里。`hook-run` 的全部参数
-(`--out`/`--workdir`/`--spec`/`--lang`/`--scan-root`/`--provider`/`--model`/`--tui`)原样透传。`--tui`(或 `PBT_HOOK_TUI=1`)会在同一个终端里用完整的交互式界面跑(适合演示,别用在 CI:每轮结束后它会停下来等你 `/quit`)。
+(`--out`/`--workdir`/`--spec`/`--lang`/`--scan-root`/`--effort`/`--provider`/`--model`/`--tui`)原样透传。`--tui`(或 `PBT_HOOK_TUI=1`)会在同一个终端里用完整的交互式界面跑(适合演示,别用在 CI:每轮结束后它会停下来等你 `/quit`)。
+
+### 真机上的 HarmonyOS 应用(`pi-pbt kea`)
+
+上面讲的都是测**源码**。`pi-pbt kea` 测的是另一类目标:**已经装在 USB 手机上的
+HarmonyOS 应用**,把它当黑盒、从 GUI 上测。它通过 `hdc` 驱动 Kea2 引擎 ——
+Kea2 一边自动探索应用界面,一边检查"无论用户怎么操作都应该成立"的性质 ——
+并报告崩溃、ANR 和性质违例。
+
+运行前有三样东西必须就位:
+
+| | |
+|---|---|
+| 手机 | USB 连接,且解锁不需要 PIN;`hdc` 在 `PATH` 上(`hdc list targets` 能看到序列号) |
+| Kea2 | 一份带虚拟环境的 Kea2,即 `<kea_home>/.venv/bin/kea2`(或 `venv/bin/kea2`)存在 |
+| 反编译信号 | `<decompile_home>/mined_all/<package>/signals.json`,需事先从应用挖出。没有就直接中止,不做无目标的盲目探索 |
+
+配置写在你启动它的那个目录里的 `kea.config.yml`(即"SUT 目录")。最小配置:
+
+```yaml
+package: com.example.app
+kea_home: /path/to/Kea2
+decompile_home: /path/to/harmony-decompile
+```
+
+然后:
+
+```bash
+cd /path/to/sut-folder     # 放 kea.config.yml 的目录
+pi-pbt kea                 # 交互式
+pi-pbt kea -p              # headless(CI、nohup)
+pi-pbt kea -c              # 续跑:沿用上一次的产物目录
+pi-pbt kea --config other.yml --lang zh
+```
+
+命令行参数就这四个,其余全在配置文件里:
+
+| 配置项 | 默认值 | 含义 |
+|---|---|---|
+| `package` | **必填** | 被测应用的 bundle 名 |
+| `kea_home` | `~/github/Kea2` | Kea2 所在目录(其虚拟环境提供 `kea2` 命令) |
+| `decompile_home` | **必填** | 存放 `mined_all/<package>/signals.json` 的目录 |
+| `device` | 当前连着的那台 | 设备序列号,接了多台手机时需要 |
+| `out` | `pbt-out` | 产物目录,相对 SUT 目录 |
+| `depth` | 由 effort 档位决定 | `fast`(短跑)或 `deep`(跑完整的性质包) |
+| `events`、`running_minutes`、`throttle` | 15 / 6 / 500(fast),70 / 12 / 200(deep) | 探索预算:最大步数、时长(分钟)、两次事件间隔(毫秒) |
+| `mode_a_packs` | 内置的那几个包 | 仅 `deep`:要跑的性质包所在的 Python 模块 |
+| `stamp_runs` | `true` | 每次运行单独一个带时间戳的目录;`false` 则平铺写进 `out` |
+| `provider`、`model`、`lang` | —— | 与全局选项含义相同 |
+
+depth 和上面的 [effort 档位](#挖多深effort-档位)是同一个"挖多深"的旋钮,不重复设:
+配置里的 `depth:` 优先级最高,其次 `PBT_KEA_DEPTH`,最后是档位
+(`quick` → `fast`,`standard`/`thorough` → `deep`)。
+
+一次运行留下的产物:
+
+```text
+pbt-out/
+  LATEST                                    # 指向最新一次运行的目录
+  runs/<package>_modeB_<depth>_<时间戳>/
+    layout.json      一次界面 dump
+    kea-run/         Kea2 自己的输出(res_*/result_*.json)
+    LAST_RUN.json    解析出来的计数:执行数、失败数、每条性质的统计
+    REPORT.md        结论
+```
+
+配置文件不存在、配置里没写 `package:`、或反编译信号缺失时,它会打印具体原因
+并以退出码 `1` 结束,不会去动手机。
 
 ### 环境变量
 
@@ -238,6 +344,9 @@ pi-pbt watch --repo /path/to/repo --fetch --branch master --interval 60 --lang z
 | `PBT_SCAN_ROOT=/path` | 要扫描的仓库路径。用于工作目录是一份干净副本的场景(git hook / CI) |
 | `PBT_OH_WORKSPACE=/path` | 预先准备好的完整 OpenHarmony 源码环境(源码 + 编译工具链 + 已编译好的依赖),直接复用而不是从头推导怎么单独构建。仓库位于这样的环境内部时(某个上级目录同时有 `.repo/` 和 `out/`)会**自动识别**,只有要覆盖时才需要显式设置;启动日志会打印实际用的是哪个 |
 | `PBT_HOOK_TUI=1` | 等同 `hook-run --tui` / `watch --tui`:用交互式界面跑(需要终端;结束后等你 `/quit`) |
+| `PBT_EFFORT=quick\|standard\|thorough` | 一次 campaign 挖多深(见[effort 档位](#挖多深effort-档位));`hook-run` / `watch` 上的 `--effort` 优先级更高。默认:`hook-run`/`watch` 为 `quick`,其他入口为 `standard`。`kea.config.yml` 没写 `depth:` 时,GUI 探索深度也由它决定(`quick` → 短跑,其余 → 长跑) |
+| `PBT_KEA_DEPTH=fast\|deep` | [`pi-pbt kea`](#真机上的-harmonyos-应用pi-pbt-kea) 的探索深度,覆盖 effort 档位;配置里的 `depth:` 仍然优先 |
+| `PBT_KEA_MODE_A_PACKS="pkg.a pkg.b"` | 配置里没写 `mode_a_packs` 时,`pi-pbt kea` 在 `deep` 下要跑的性质包 |
 
 ## 5. 网页面板:实时看它在干什么
 
