@@ -302,6 +302,72 @@ are not tested retroactively); every new commit is then tested, with the verdict
 interactive interface in the same terminal (good for demos, not for CI: it stops
 and waits for `/quit` after each round).
 
+### Delegation from another coding agent (MCP)
+
+If your day-to-day agent is Claude Code or Codex, it can delegate PBT to pi-pbt
+over the [Model Context Protocol](https://modelcontextprotocol.io) and **keep
+developing while the campaign runs**. `pi-pbt mcp` serves MCP over stdio from
+the same single binary:
+
+```bash
+# Claude Code
+claude mcp add --transport stdio pi-pbt -- pi-pbt mcp
+
+# Codex
+codex mcp add pi-pbt -- pi-pbt mcp
+```
+
+The server exposes six tools:
+
+| Tool | What it does |
+|---|---|
+| `pbt_start` | start a campaign on **one immutable commit** (default: current `HEAD`, resolved to a full sha); returns a `run_id` immediately |
+| `pbt_status` | state / phase / queue position / artifact URIs for a run or watch |
+| `pbt_report` | verdict (`passed` / `bugs_found` / `failed`), `REPORT.md` summary, bug-report index, patch presence |
+| `pbt_cancel` | cancel a queued or running campaign (idempotent) |
+| `pbt_watch_start` | start one campaign per new commit on a branch |
+| `pbt_watch_stop` | stop a watch (by default cancelling its in-flight run) |
+
+The isolation contract is the point: **pi-pbt never tests your changing working
+tree.** Every run snapshots the requested commit into a detached `git worktree`
+and campaigns there, so you can keep editing, committing, and even rewriting the
+same files while it runs — commit a checkpoint, call `pbt_start`, continue
+coding.
+
+Nothing committed yet? Pass `include_uncommitted: true` to `pbt_start` and the
+current uncommitted state (tracked modifications plus untracked non-ignored
+files) is frozen into an immutable snapshot commit first, then tested exactly
+like any other revision. The snapshot is minted with a throwaway git index —
+your index, `HEAD`, refs, stash, and files are untouched, and you can keep
+typing while it runs. A clean tree simply tests `HEAD`. It is mutually
+exclusive with `revision`, and the run reports `snapshot: true` plus the
+`base_revision` it was taken on. When the run finishes, the worktree is removed; what survives lives
+under `~/.pi-pbt/runs/<run-id>/` (override with `PI_PBT_RUNS_DIR`): `run.json`,
+`events.jsonl`, both logs, the campaign artifacts, and a `changes.patch` holding
+everything the campaign wrote in its worktree. All of it is also readable
+through MCP resources at `pbt://runs/<run-id>/...` (`REPORT.md`,
+`PROPERTIES.md`, `bug_reports/<slug>.md`, `changes.patch`, …).
+
+Heavy campaigns are serialized: one child at a time by default
+(`PBT_MCP_MAX_CONCURRENT` raises it); further `pbt_start` calls queue. A watch
+defaults to `supersede: true` — a newer commit cancels an in-flight run that has
+not reached Review, while a run already in Review finishes first and
+intermediate commits coalesce to the newest one, so the watch always converges
+on the latest code without stacking campaigns.
+
+Progress is pushed two ways. Standard MCP logging notifications work in every
+client, and polling `pbt_status` is always reliable. Claude Code sessions can
+additionally receive live channel events (campaign phase changes and the final
+verdict, carrying only run IDs and status — never repository content). Channels
+are a Claude Code research preview, so this part needs an explicit opt-in at
+launch:
+
+```bash
+claude --dangerously-load-development-channels server:pi-pbt
+```
+
+Without that flag everything except the push still works.
+
 ### A HarmonyOS app on a phone (`pi-pbt kea`)
 
 Everything above tests **source code**. `pi-pbt kea` tests something different:
@@ -383,6 +449,8 @@ is touched.
 | `PBT_EFFORT=quick\|standard\|thorough` | how deep a campaign digs (see [effort tiers](#how-deep-it-digs-effort-tiers)); also `--effort` on `hook-run` / `watch`, which takes priority. Default: `quick` for `hook-run`/`watch`, `standard` elsewhere. Also sets the `kea` GUI exploration depth when `kea.config.yml` does not pin `depth:` (`quick` → short run, otherwise the long one) |
 | `PBT_KEA_DEPTH=fast\|deep` | [`pi-pbt kea`](#a-harmonyos-app-on-a-phone-pi-pbt-kea) exploration depth, overriding the effort tier; the config's `depth:` still wins |
 | `PBT_KEA_MODE_A_PACKS="pkg.a pkg.b"` | the property packs `pi-pbt kea` runs at `deep`, when the config sets no `mode_a_packs` |
+| `PI_PBT_RUNS_DIR=/path` | where [`pi-pbt mcp`](#delegation-from-another-coding-agent-mcp) persists run state and artifacts (default `~/.pi-pbt/runs`; must be outside the repo under test) |
+| `PBT_MCP_MAX_CONCURRENT=2` | how many MCP-delegated campaigns may run at once (default 1; extra runs queue) |
 
 ## 5. Dashboard: watch it work, live
 

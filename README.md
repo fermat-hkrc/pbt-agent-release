@@ -1,6 +1,6 @@
 # pi-pbt — releases
 
-[中文](#中文) · [Installation guide](docs/installation.md) · [安装指南](docs/installation.zh.md)
+[中文](#中文) · [Changelog / 更新日志](CHANGELOG.md) · [Installation guide](docs/installation.md) · [安装指南](docs/installation.zh.md)
 
 pi-pbt is an AI agent that runs **property-based testing** campaigns on a
 codebase. Point it at a Python, Rust, Go, Java, or C++ repository and it reads

@@ -269,6 +269,64 @@ pi-pbt watch --repo /path/to/repo --fetch --branch master --interval 60 --lang z
 测一遍,结论(上面那套退出码)打在日志里。`hook-run` 的全部参数
 (`--out`/`--workdir`/`--spec`/`--lang`/`--scan-root`/`--effort`/`--provider`/`--model`/`--tui`)原样透传。`--tui`(或 `PBT_HOOK_TUI=1`)会在同一个终端里用完整的交互式界面跑(适合演示,别用在 CI:每轮结束后它会停下来等你 `/quit`)。
 
+### 让别的 coding agent 委派测试(MCP)
+
+如果你日常用的是 Claude Code 或 Codex,可以让它通过
+[Model Context Protocol](https://modelcontextprotocol.io) 把性质测试委派给
+pi-pbt,**测试跑着的同时继续开发**。`pi-pbt mcp` 用同一个单文件二进制以 stdio
+方式提供 MCP 服务:
+
+```bash
+# Claude Code
+claude mcp add --transport stdio pi-pbt -- pi-pbt mcp
+
+# Codex
+codex mcp add pi-pbt -- pi-pbt mcp
+```
+
+服务端提供六个工具:
+
+| 工具 | 作用 |
+|---|---|
+| `pbt_start` | 对**一个不可变的 commit**(默认当前 `HEAD`,解析成完整 sha)发起 campaign;立即返回 `run_id` |
+| `pbt_status` | 查询某个 run 或 watch 的状态/阶段/排队位置/产物 URI |
+| `pbt_report` | 结论(`passed` / `bugs_found` / `failed`)、`REPORT.md` 摘要、bug 报告清单、是否有 patch |
+| `pbt_cancel` | 取消排队或进行中的 campaign(幂等) |
+| `pbt_watch_start` | 监听分支,每来一个新 commit 发起一次 campaign |
+| `pbt_watch_stop` | 停止监听(默认连带取消进行中的 run) |
+
+隔离契约是关键:**pi-pbt 永远不测你还在改的工作树。** 每个 run 都把指定的
+commit 快照进一个独立的 `git worktree` 再开测,所以你可以继续编辑、提交、
+甚至改同一批文件 —— 提交一个 checkpoint、调 `pbt_start`、接着写代码就行。
+
+代码还没 commit?给 `pbt_start` 传 `include_uncommitted: true`,它会先把当前
+未提交状态(已跟踪文件的修改 + 未跟踪且未被 ignore 的新文件)冻结成一个不可变
+的快照 commit,再像普通 revision 一样去测。快照用一次性的 git index 生成 ——
+你的 index、`HEAD`、refs、stash 和文件全都不动,期间可以继续写代码。工作树
+干净时就直接测 `HEAD`。该参数与 `revision` 互斥;run 会返回 `snapshot: true`
+和快照所基于的 `base_revision`。
+run 结束后 worktree 被清掉;留下的东西在 `~/.pi-pbt/runs/<run-id>/`
+(用 `PI_PBT_RUNS_DIR` 改位置):`run.json`、`events.jsonl`、两份日志、campaign
+产物,以及一份 `changes.patch`(campaign 在自己 worktree 里写下的全部内容)。
+这些也都能通过 MCP resources 按 `pbt://runs/<run-id>/...` 读取(`REPORT.md`、
+`PROPERTIES.md`、`bug_reports/<slug>.md`、`changes.patch` 等)。
+
+重量级 campaign 串行执行:默认同时只跑一个子进程(`PBT_MCP_MAX_CONCURRENT`
+可调高),多余的 `pbt_start` 排队。watch 默认 `supersede: true` —— 新 commit
+会取消一个还没进 Review 的进行中 run;已经在 Review 的 run 先跑完,中间积压的
+commit 合并成最新那个,所以 watch 永远收敛到最新代码、不会堆积 campaign。
+
+进度有两条推送路径。标准 MCP logging 通知在任何客户端都能用,轮询
+`pbt_status` 永远可靠。Claude Code 会话还能收到实时 channel 事件(阶段变化和
+最终结论,只携带 run ID 和状态 —— 绝不携带仓库内容)。channel 是 Claude Code
+的 research preview 功能,这部分需要启动时显式开启:
+
+```bash
+claude --dangerously-load-development-channels server:pi-pbt
+```
+
+不加这个 flag,除了推送以外的一切照常工作。
+
 ### 真机上的 HarmonyOS 应用(`pi-pbt kea`)
 
 上面讲的都是测**源码**。`pi-pbt kea` 测的是另一类目标:**已经装在 USB 手机上的
@@ -347,6 +405,8 @@ pbt-out/
 | `PBT_EFFORT=quick\|standard\|thorough` | 一次 campaign 挖多深(见[effort 档位](#挖多深effort-档位));`hook-run` / `watch` 上的 `--effort` 优先级更高。默认:`hook-run`/`watch` 为 `quick`,其他入口为 `standard`。`kea.config.yml` 没写 `depth:` 时,GUI 探索深度也由它决定(`quick` → 短跑,其余 → 长跑) |
 | `PBT_KEA_DEPTH=fast\|deep` | [`pi-pbt kea`](#真机上的-harmonyos-应用pi-pbt-kea) 的探索深度,覆盖 effort 档位;配置里的 `depth:` 仍然优先 |
 | `PBT_KEA_MODE_A_PACKS="pkg.a pkg.b"` | 配置里没写 `mode_a_packs` 时,`pi-pbt kea` 在 `deep` 下要跑的性质包 |
+| `PI_PBT_RUNS_DIR=/path` | [`pi-pbt mcp`](#让别的-coding-agent-委派测试mcp) 保存 run 状态与产物的目录(默认 `~/.pi-pbt/runs`;必须在被测仓库之外) |
+| `PBT_MCP_MAX_CONCURRENT=2` | MCP 委派的 campaign 同时最多跑几个(默认 1,多余的排队) |
 
 ## 5. 网页面板:实时看它在干什么
 
